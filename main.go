@@ -17,6 +17,7 @@ import (
 var R = flag.Int("r", 0, "rate to produce messages (per second)")
 var N = flag.Int("n", 0, "number of topics")
 var P = flag.Int("p", 0, "number of publishers")
+var B = flag.Int("b", 0, "number of publishes to include in a batch")
 
 var total int
 var startTime time.Time
@@ -27,7 +28,7 @@ var NUM_SUBSCRIBER_THREADS = 16
 func usage() {
 	fmt.Printf("Usage:\n\n")
 	fmt.Printf("  publish messages at rate R randomly across N different topics:\n")
-	fmt.Printf("    -r <R> -n <N> publish\n\n")
+	fmt.Printf("    -r <R> -n <N> -b <batch size if any> publish\n\n")
 	fmt.Printf("  subscribe to N different topics and expect P publishers:\n")
 	fmt.Printf("    -n <N> -p <P> subscribe\n\n")
 }
@@ -58,7 +59,7 @@ func main() {
 			<-c
 			close(done)
 		}()
-		publish(address, *R, *N, done)
+		publish(address, *R, *N, *B, done)
 	case "subscribe":
 		if *N == 0 || *P == 0 {
 			usage()
@@ -74,7 +75,7 @@ func main() {
 }
 
 // publish at a fixed rate with a single thread
-func publish(address string, r, n int, done chan struct{}) {
+func publish(address string, r, n, b int, done chan struct{}) {
 	// create a connection per thread
 	conns := make([]redis.Conn, NUM_PUBLISHER_THREADS)
 	for i := 0; i < len(conns); i++ {
@@ -92,13 +93,30 @@ func publish(address string, r, n int, done chan struct{}) {
 	startTime = time.Now()
 	for _, c := range conns {
 		go func(conn redis.Conn) {
+			count := 0
 			limiter := rate.NewLimiter(rate.Limit(float64(r/len(conns))), 100)
 			for {
 				r := limiter.ReserveN(time.Now(), 1)
 				if r.OK() {
 					topic := strconv.Itoa(rand.Intn(n))
-					if _, err := conn.Do("PUBLISH", topic, "update"); err != nil {
+					if err := conn.Send("PUBLISH", topic, "update"); err != nil {
 						panic(err)
+					}
+					count++
+					// support batching
+					if b == 0 || count%b == 0 {
+						if err := conn.Flush(); err != nil {
+							panic(err)
+						}
+						times := b
+						if times == 0 {
+							times = 1
+						}
+						for i := 0; i < times; i++ {
+							if _, err := conn.Receive(); err != nil {
+								panic(err)
+							}
+						}
 					}
 					func() {
 						mu.Lock()
