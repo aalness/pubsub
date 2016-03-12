@@ -75,7 +75,7 @@ The only practical difference with this run is that I pipelined notifications in
 
 ###### Publisher command:
 
-`$ REDIS_HOST_ADDRESS="..redacted.." ~/go/bin/pubsub r 100000 -n 1000000 -b 8 publish`
+`$ REDIS_HOST_ADDRESS="..redacted.." ~/go/bin/pubsub -r 100000 -n 1000000 -b 8 publish`
 
 ###### Results
 
