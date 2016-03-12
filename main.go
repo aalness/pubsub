@@ -60,7 +60,7 @@ func main() {
 		}()
 		publish(address, *R, *N, done)
 	case "subscribe":
-		if *N == 0 {
+		if *N == 0 || *P == 0 {
 			usage()
 			return
 		}
