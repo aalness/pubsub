@@ -9,7 +9,7 @@ Clients run on 5 `m4.large` AWS EC2 instances. The instances have 2 CPUs and 8 G
 Each instance has a publisher client with a pool of 4 threads and a subscriber client with
 a pool of 16 threads.
 
-Each subscriber subscribes to 1 million different channels. Each publisher receives every message from every publisher.
+Each subscriber subscribes to 1 million different channels -- they do this inefficiently one by one prior to starting the publishers which is why you see the initial humps in the CPU graphs. Each publisher receives every message from every publisher.
 
 Each publisher randomly publishes notificatons across the 1 million channel space.
 
