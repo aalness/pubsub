@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/garyburd/redigo/redis"
@@ -20,6 +21,8 @@ var P = flag.Int("p", 0, "number of publishers")
 var total int
 var startTime time.Time
 var stop bool
+
+var NUM_SUBSCRIBER_THREADS = 16
 
 func usage() {
 	fmt.Printf("Usage:\n\n")
@@ -42,11 +45,6 @@ func main() {
 		return
 	}
 
-	conn, err := redis.Dial("tcp", address)
-	if err != nil {
-		panic(err)
-	}
-
 	switch flag.Arg(0) {
 	case "publish":
 		if *N == 0 || *R == 0 {
@@ -59,20 +57,13 @@ func main() {
 			<-c
 			stop = true
 		}()
-		publish(conn, *R, *N)
-		// send exit
-		if err := conn.Send("PUBLISH", "0", "exit"); err != nil {
-			panic(err)
-		}
-		if err := conn.Flush(); err != nil {
-			panic(err)
-		}
+		publish(address, *R, *N)
 	case "subscribe":
 		if *N == 0 {
 			usage()
 			return
 		}
-		subscribe(conn, *N, *P)
+		subscribe(address, *N, *P)
 	default:
 		usage()
 		return
@@ -81,7 +72,12 @@ func main() {
 	fmt.Printf("total msgs processed: %d, achieved rate: %.2f msgs/sec\n", total, rate)
 }
 
-func publish(conn redis.Conn, r, n int) {
+// publish at a fixed rate with a single thread
+func publish(address string, r, n int) {
+	conn, err := redis.Dial("tcp", address)
+	if err != nil {
+		panic(err)
+	}
 	limiter := rate.NewLimiter(rate.Limit(float64(r)), 100)
 	startTime = time.Now()
 	for !stop {
@@ -98,13 +94,31 @@ func publish(conn redis.Conn, r, n int) {
 		}
 		time.Sleep(r.Delay())
 	}
+	// send exit
+	fmt.Println("sent exit")
+	if err := conn.Send("PUBLISH", "0", "exit"); err != nil {
+		panic(err)
+	}
+	if err := conn.Flush(); err != nil {
+		panic(err)
+	}
 }
 
-func subscribe(conn redis.Conn, n, p int) {
-	pubsub := &redis.PubSubConn{conn}
-	exit := 0
+// subscribe NUM_SUBSCRIBER_THREADS threads
+func subscribe(address string, n, p int) {
+	// create a connection per thread
+	pubsubs := make([]*redis.PubSubConn, NUM_SUBSCRIBER_THREADS)
+	for i := 0; i < len(pubsubs); i++ {
+		conn, err := redis.Dial("tcp", address)
+		if err != nil {
+			panic(err)
+		}
+		pubsubs[i] = &redis.PubSubConn{conn}
+	}
+	// evenly split topics across connections
 	for i := 0; i < n; i++ {
 		topic := strconv.Itoa(i)
+		pubsub := pubsubs[i%len(pubsubs)]
 		if err := pubsub.Subscribe(topic); err != nil {
 			panic(err)
 		}
@@ -114,20 +128,44 @@ func subscribe(conn redis.Conn, n, p int) {
 		}
 	}
 	fmt.Printf("subscribed to %d topics\n", n)
-	for {
-		switch msg := pubsub.Receive().(type) {
-		case error:
-			panic(msg)
-		case redis.Message:
-			if string(msg.Data) == "exit" {
-				if exit++; exit == p {
+
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	wg.Add(len(pubsubs))
+
+	// poll the connections
+	for _, pubsub := range pubsubs {
+		go func(pubsub *redis.PubSubConn) {
+			exits := 0
+			for {
+				switch msg := pubsub.Receive().(type) {
+				case error:
+					fmt.Println(msg)
+					wg.Done()
 					return
+				case redis.Message:
+					if string(msg.Data) == "exit" {
+						// only first thread gets exits
+						if exits++; exits == p {
+							// close all pubsubs
+							for _, ps := range pubsubs {
+								ps.Close()
+							}
+							wg.Done()
+							return
+						}
+					}
 				}
+				func() {
+					mu.Lock()
+					defer mu.Unlock()
+					if total == 0 {
+						startTime = time.Now()
+					}
+					total++
+				}()
 			}
-		}
-		if total == 0 {
-			startTime = time.Now()
-		}
-		total++
+		}(pubsub)
 	}
+	wg.Wait()
 }
