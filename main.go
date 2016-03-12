@@ -20,7 +20,6 @@ var P = flag.Int("p", 0, "number of publishers")
 
 var total int
 var startTime time.Time
-var stop bool
 
 var NUM_SUBSCRIBER_THREADS = 16
 
@@ -52,12 +51,13 @@ func main() {
 			return
 		}
 		c := make(chan os.Signal, 1)
+		done := make(chan struct{}, 1)
 		signal.Notify(c, os.Interrupt)
 		go func() {
 			<-c
-			stop = true
+			done <- struct{}{}
 		}()
-		publish(address, *R, *N)
+		publish(address, *R, *N, done)
 	case "subscribe":
 		if *N == 0 {
 			usage()
@@ -73,14 +73,15 @@ func main() {
 }
 
 // publish at a fixed rate with a single thread
-func publish(address string, r, n int) {
+func publish(address string, r, n int, done chan struct{}) {
 	conn, err := redis.Dial("tcp", address)
 	if err != nil {
 		panic(err)
 	}
 	limiter := rate.NewLimiter(rate.Limit(float64(r)), 100)
 	startTime = time.Now()
-	for !stop {
+	ok := true
+	for ok {
 		r := limiter.ReserveN(time.Now(), 1)
 		if r.OK() {
 			topic := strconv.Itoa(rand.Intn(n))
@@ -93,9 +94,13 @@ func publish(address string, r, n int) {
 			total++
 		}
 		time.Sleep(r.Delay())
+		select {
+		case <-done:
+			ok = false
+		default:
+		}
 	}
 	// send exit
-	fmt.Println("sent exit")
 	if err := conn.Send("PUBLISH", "0", "exit"); err != nil {
 		panic(err)
 	}
