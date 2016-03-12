@@ -85,10 +85,7 @@ func publish(address string, r, n int, done chan struct{}) {
 		r := limiter.ReserveN(time.Now(), 1)
 		if r.OK() {
 			topic := strconv.Itoa(rand.Intn(n))
-			if err := conn.Send("PUBLISH", topic, "update"); err != nil {
-				panic(err)
-			}
-			if err := conn.Flush(); err != nil {
+			if _, err := conn.Do("PUBLISH", topic, "update"); err != nil {
 				panic(err)
 			}
 			total++
@@ -101,10 +98,7 @@ func publish(address string, r, n int, done chan struct{}) {
 		}
 	}
 	// send exit
-	if err := conn.Send("PUBLISH", "0", "exit"); err != nil {
-		panic(err)
-	}
-	if err := conn.Flush(); err != nil {
+	if _, err := conn.Do("PUBLISH", "0", "exit"); err != nil {
 		panic(err)
 	}
 }
