@@ -21,6 +21,7 @@ var P = flag.Int("p", 0, "number of publishers")
 var total int
 var startTime time.Time
 
+var NUM_PUBLISHER_THREADS = 4
 var NUM_SUBSCRIBER_THREADS = 16
 
 func usage() {
@@ -55,7 +56,7 @@ func main() {
 		signal.Notify(c, os.Interrupt)
 		go func() {
 			<-c
-			done <- struct{}{}
+			close(done)
 		}()
 		publish(address, *R, *N, done)
 	case "subscribe":
@@ -74,31 +75,53 @@ func main() {
 
 // publish at a fixed rate with a single thread
 func publish(address string, r, n int, done chan struct{}) {
-	conn, err := redis.Dial("tcp", address)
-	if err != nil {
-		panic(err)
+	// create a connection per thread
+	conns := make([]redis.Conn, NUM_PUBLISHER_THREADS)
+	for i := 0; i < len(conns); i++ {
+		conn, err := redis.Dial("tcp", address)
+		if err != nil {
+			panic(err)
+		}
+		conns[i] = conn
 	}
-	limiter := rate.NewLimiter(rate.Limit(float64(r)), 100)
+
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	wg.Add(len(conns))
+
 	startTime = time.Now()
-	ok := true
-	for ok {
-		r := limiter.ReserveN(time.Now(), 1)
-		if r.OK() {
-			topic := strconv.Itoa(rand.Intn(n))
-			if _, err := conn.Do("PUBLISH", topic, "update"); err != nil {
-				panic(err)
+	for _, c := range conns {
+		go func(conn redis.Conn) {
+			limiter := rate.NewLimiter(rate.Limit(float64(r/len(conns))), 100)
+			for {
+				r := limiter.ReserveN(time.Now(), 1)
+				if r.OK() {
+					topic := strconv.Itoa(rand.Intn(n))
+					if _, err := conn.Do("PUBLISH", topic, "update"); err != nil {
+						panic(err)
+					}
+					func() {
+						mu.Lock()
+						defer mu.Unlock()
+						total++
+					}()
+				}
+				time.Sleep(r.Delay())
+				select {
+				case _, ok := <-done:
+					if !ok {
+						wg.Done()
+					}
+					return
+				default:
+				}
 			}
-			total++
-		}
-		time.Sleep(r.Delay())
-		select {
-		case <-done:
-			ok = false
-		default:
-		}
+		}(c)
 	}
+	wg.Wait()
+
 	// send exit
-	if _, err := conn.Do("PUBLISH", "0", "exit"); err != nil {
+	if _, err := conns[0].Do("PUBLISH", "0", "exit"); err != nil {
 		panic(err)
 	}
 }
