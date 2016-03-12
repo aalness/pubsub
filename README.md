@@ -47,15 +47,15 @@ I performed several runs to verify results and debug but I'll highlight two simp
 
 Clients CPU:
 
-![clients CPU](https://keybase.pub/alness/screenshots/redis/run1/clients_cpu.png)
+![clients CPU](https://cloud.githubusercontent.com/assets/4391003/13725542/bcf7a2ac-e859-11e5-9dfd-dea375dab40a.png)
 
 Node CPU:
 
-![node CPU](https://keybase.pub/alness/screenshots/redis/run1/node_cpu.png)
+![node CPU](https://cloud.githubusercontent.com/assets/4391003/13725544/bcf9e828-e859-11e5-8c6f-511412159ec7.png)
 
 Node memory:
 
-![node memory](https://keybase.pub/alness/screenshots/redis/run1/node_memory.png)
+![node memory](https://cloud.githubusercontent.com/assets/4391003/13725543/bcf9af3e-e859-11e5-9784-ecce016b9609.png)
 
 ##### Run 2
 
@@ -89,15 +89,15 @@ The only practical difference with this run is that I pipelined notifications on
 
 Clients CPU:
 
-![clients CPU](https://keybase.pub/alness/screenshots/redis/run2/clients_cpu.png)
+![clients CPU](https://cloud.githubusercontent.com/assets/4391003/13725548/c7fedf3a-e859-11e5-8db9-42f0218c2f91.png)
 
 Node CPU:
 
-![node CPU](https://keybase.pub/alness/screenshots/redis/run2/node_cpu.png)
+![node CPU](https://cloud.githubusercontent.com/assets/4391003/13725547/c7fcbbf6-e859-11e5-8545-a34646f18c33.png)
 
 Node memory:
 
-![node memory](https://keybase.pub/alness/screenshots/redis/run2/node_memory.png)
+![node memory](https://cloud.githubusercontent.com/assets/4391003/13725546/c7fcb610-e859-11e5-9a50-0c2a5294de77.png)
 
 
 
