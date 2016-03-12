@@ -5,11 +5,11 @@ topics and relatively few clients (a server cluster.)
 
 ##### Setup
 
-My clients run on 5 `m4.large` AWS EC2 instances. They have 2 CPUs and 8 GiB of memory each.
-Each instance has a publisher client using a pool of 4 threads and a subscriber client with
+Clients run on 5 `m4.large` AWS EC2 instances. The instances have 2 CPUs and 8 GiB of memory each.
+Each instance has a publisher client with a pool of 4 threads and a subscriber client with
 a pool of 16 threads.
 
-Each subscriber subscribes to 1 million different channels. They each receive every message from every publisher.
+Each subscriber subscribes to 1 million different channels. Each publisher receives every message from every publisher.
 
 Each publisher randomly publishes notificatons across the 1 million channel space.
 
@@ -59,7 +59,7 @@ Node memory:
 
 ##### Run 2
 
-The only practical difference with this run is that I pipelined notifications on batches of 8.
+The only practical difference with this run is that I pipelined notifications in batches of 8.
 
 ###### Subscriber command:
 
