@@ -101,7 +101,24 @@ Node memory:
 
 ##### Run 3
 
-I repeated run 2 but set the batch size to 32. With this setting I achieved ~37K msgs/sec write throughput per publisher
-client and ~190K msgs/sec per subscriber process.
+I repeated run 2 but set the batch size to 32.
 
-No memory utilizaton change from Run 2 for the node nor any CPU change. Client node CPU usage was roughly the same as well.
+No memory utilizaton change from Run 2 for the node nor any CPU change.
+
+Client node CPU usage was roughly the same as well.
+
+###### Subscriber results
+
+`total msgs processed: 93935396, achieved rate: 190140.83 msgs/sec`
+`total msgs processed: 93935396, achieved rate: 190139.93 msgs/sec`
+`total msgs processed: 93935396, achieved rate: 190146.17 msgs/sec`
+`total msgs processed: 93935396, achieved rate: 190145.24 msgs/sec`
+`total msgs processed: 93935396, achieved rate: 190139.43 msgs/sec`
+
+###### Publisher results
+
+`total msgs processed: 18658112, achieved rate: 38018.40 msgs/sec`
+`total msgs processed: 18397376, achieved rate: 37492.26 msgs/sec`
+`total msgs processed: 18478816, achieved rate: 37657.04 msgs/sec`
+`total msgs processed: 20229120, achieved rate: 41222.69 msgs/sec`
+`total msgs processed: 18171968, achieved rate: 37022.74 msgs/sec`
