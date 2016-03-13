@@ -15,7 +15,7 @@ Each publisher randomly publishes notificatons across the 1 million channel spac
 
 The redis node is a `cache.r3.large` AWS ElastiCache node. It has 2 CPUs and 13.5 GiB of memory.
 
-I performed several runs to verify results and debug but I'll highlight two simple example runs.
+I performed several runs to verify results and debug but I'll highlight a few simple example runs.
 
 ##### Run 1
 
@@ -99,5 +99,9 @@ Node memory:
 
 ![node memory](https://cloud.githubusercontent.com/assets/4391003/13725546/c7fcb610-e859-11e5-9a50-0c2a5294de77.png)
 
+##### Run 3
 
+I repeated run 2 but set the batch size to 32. With this setting I achieved ~37K msgs/sec write throughput per publisher
+client and ~190K msgs/sec per subscriber process.
 
+No memory utilizaton change from Run 2 for the node nor any CPU change. Client node CPU usage was roughly the same as well.
