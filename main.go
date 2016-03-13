@@ -16,21 +16,16 @@ import (
 
 var R = flag.Int("r", 0, "rate to produce messages (per second)")
 var N = flag.Int("n", 0, "number of topics")
-var P = flag.Int("p", 0, "number of publishers")
-var B = flag.Int("b", 0, "number of publishes to include in a batch")
-
-var total int
-var startTime time.Time
-
-var NUM_PUBLISHER_THREADS = 4
-var NUM_SUBSCRIBER_THREADS = 16
+var P = flag.Int("p", 1, "number of publishers")
+var S = flag.Int("s", 1, "number of subscribers")
+var F = flag.Int("f", 50, "flush interval msecs")
 
 func usage() {
 	fmt.Printf("Usage:\n\n")
-	fmt.Printf("  publish messages at rate R randomly across N different topics:\n")
-	fmt.Printf("    -r <R> -n <N> -b <batch size if any> publish\n\n")
-	fmt.Printf("  subscribe to N different topics and expect P publishers:\n")
-	fmt.Printf("    -n <N> -p <P> subscribe\n\n")
+	fmt.Printf("  publish at rate R randomly across N topics with P publishers and F flush interval:\n")
+	fmt.Printf("    -r <R> -n <N> [-p <P> -f <F>] publish\n\n")
+	fmt.Printf("  subscribe to N different topics across S subscribers:\n")
+	fmt.Printf("   -n <N> [-s <S>] subscribe\n\n")
 }
 
 func main() {
@@ -46,6 +41,9 @@ func main() {
 		return
 	}
 
+	var total int
+	var startTime time.Time
+
 	switch flag.Arg(0) {
 	case "publish":
 		if *N == 0 || *R == 0 {
@@ -59,13 +57,16 @@ func main() {
 			<-c
 			close(done)
 		}()
-		publish(address, *R, *N, *B, done)
+		fmt.Printf("publish: %d goroutines, %d topics, %d msgs/sec, %d ms flush interval\n",
+			*P, *N, *R, *F)
+		total, startTime = publish(address, *P, *N, *R, *F, done)
 	case "subscribe":
-		if *N == 0 || *P == 0 {
+		if *N == 0 {
 			usage()
 			return
 		}
-		subscribe(address, *N, *P)
+		fmt.Printf("subscribe: %d goroutines, %d topics\n", *S, *N)
+		total, startTime = subscribe(address, *S, *N)
 	default:
 		usage()
 		return
@@ -74,80 +75,141 @@ func main() {
 	fmt.Printf("total msgs processed: %d, achieved rate: %.2f msgs/sec\n", total, rate)
 }
 
-// publish at a fixed rate with a single thread
-func publish(address string, r, n, b int, done chan struct{}) {
-	// create a connection per thread
-	conns := make([]redis.Conn, NUM_PUBLISHER_THREADS)
-	for i := 0; i < len(conns); i++ {
-		conn, err := redis.Dial("tcp", address)
-		if err != nil {
-			panic(err)
-		}
-		conns[i] = conn
+type publisher struct {
+	total int
+}
+
+// start a single publisher
+func (p *publisher) start(address string, n, r, f int, done chan struct{}, wg *sync.WaitGroup) (err error) {
+	conn, err := redis.Dial("tcp", address)
+	if err != nil {
+		return err
 	}
 
 	var mu sync.Mutex
-	var wg sync.WaitGroup
-	wg.Add(len(conns))
+	doneWrite := make(chan struct{}, 1)
 
-	startTime = time.Now()
-	for _, c := range conns {
-		go func(conn redis.Conn) {
-			count := 0
-			limiter := rate.NewLimiter(rate.Limit(float64(r/len(conns))), 100)
-			for {
-				r := limiter.ReserveN(time.Now(), 1)
-				if r.OK() {
-					topic := strconv.Itoa(rand.Intn(n))
-					if err := conn.Send("PUBLISH", topic, "update"); err != nil {
-						panic(err)
-					}
-					count++
-					// support batching
-					if b == 0 || count%b == 0 {
-						if err := conn.Flush(); err != nil {
-							panic(err)
-						}
-						times := b
-						if times == 0 {
-							times = 1
-						}
-						for i := 0; i < times; i++ {
-							if _, err := conn.Receive(); err != nil {
-								panic(err)
-							}
-						}
-					}
-					func() {
-						mu.Lock()
-						defer mu.Unlock()
-						total++
-					}()
+	// start a flusher
+	go func() {
+		for {
+			time.Sleep(time.Duration(f) * time.Millisecond)
+			mu.Lock()
+			if err := conn.Flush(); err != nil {
+				mu.Unlock()
+				return
+			}
+			mu.Unlock()
+		}
+	}()
+
+	// start a drainer
+	go func() {
+		count := 0
+		for {
+			if _, err := conn.Receive(); err != nil {
+				panic(err)
+				return
+			}
+			count++
+			select {
+			case <-doneWrite:
+				mu.Lock()
+				if count == p.total {
+					conn.Close()
+					mu.Unlock()
+					wg.Done()
+					return
 				}
-				time.Sleep(r.Delay())
+				mu.Unlock()
+			default:
+			}
+		}
+	}()
+
+	// start publishing
+	go func() {
+		limiter := rate.NewLimiter(rate.Limit(float64(r)), 100)
+		for {
+			r := limiter.ReserveN(time.Now(), 1)
+			if r.OK() {
+				topic := strconv.Itoa(rand.Intn(n))
+				mu.Lock()
+				if err := conn.Send("PUBLISH", topic, "update"); err != nil {
+					panic(err)
+				}
+				p.total++
+				mu.Unlock()
 				select {
-				case _, ok := <-done:
-					if !ok {
-						wg.Done()
-					}
+				case <-done:
+					close(doneWrite)
 					return
 				default:
 				}
 			}
-		}(c)
+			time.Sleep(r.Delay())
+		}
+	}()
+	return nil
+}
+
+// start publishing
+func publish(address string, p, n, r, f int, done chan struct{}) (int, time.Time) {
+	var wg sync.WaitGroup
+	wg.Add(p)
+
+	startTime := time.Now()
+	publishers := make([]*publisher, p)
+	for i := 0; i < p; i++ {
+		publisher := &publisher{}
+		if err := publisher.start(address, n, r, f, done, &wg); err != nil {
+			panic(err)
+		}
+		publishers[i] = publisher
 	}
 	wg.Wait()
 
-	// send exit
-	if _, err := conns[0].Do("PUBLISH", "0", "exit"); err != nil {
-		panic(err)
+	total := 0
+	for _, publisher := range publishers {
+		total += publisher.total
+	}
+	return total, startTime
+}
+
+type subscriber struct {
+	total     int
+	startTime time.Time
+}
+
+// start polling with a single subscriber
+func (s *subscriber) start(pubsub *redis.PubSubConn, done, read chan struct{}, wg *sync.WaitGroup) {
+	switch msg := pubsub.Receive().(type) {
+	case error:
+		panic(msg)
+		wg.Done()
+		return
+	}
+	s.total++
+	s.startTime = time.Now()
+	go func() {
+		<-done
+		pubsub.Close()
+	}()
+	for {
+		switch msg := pubsub.Receive().(type) {
+		case error:
+			fmt.Println(msg)
+			wg.Done()
+			return
+		}
+		s.total++
+		read <- struct{}{}
 	}
 }
 
-// subscribe NUM_SUBSCRIBER_THREADS threads
-func subscribe(address string, n, p int) {
-	// create a connection per thread
-	pubsubs := make([]*redis.PubSubConn, NUM_SUBSCRIBER_THREADS)
+// start subscribing
+func subscribe(address string, s, n int) (int, time.Time) {
+	// create a connection per goroutine
+	pubsubs := make([]*redis.PubSubConn, s)
 	for i := 0; i < len(pubsubs); i++ {
 		conn, err := redis.Dial("tcp", address)
 		if err != nil {
@@ -155,6 +217,7 @@ func subscribe(address string, n, p int) {
 		}
 		pubsubs[i] = &redis.PubSubConn{conn}
 	}
+
 	// evenly split topics across connections
 	for i := 0; i < n; i++ {
 		topic := strconv.Itoa(i)
@@ -169,43 +232,44 @@ func subscribe(address string, n, p int) {
 	}
 	fmt.Printf("subscribed to %d topics\n", n)
 
-	var mu sync.Mutex
+	read := make(chan struct{}, 1000000)
+	done := make(chan struct{}, 1)
+
+	// after the first read giveup after 2s of inactivity
+	go func() {
+		<-read
+		for {
+			select {
+			case <-read:
+			case <-time.After(time.Second * 2):
+				close(done)
+				return
+			}
+		}
+	}()
+
 	var wg sync.WaitGroup
 	wg.Add(len(pubsubs))
 
-	// poll the connections
-	for _, pubsub := range pubsubs {
-		go func(pubsub *redis.PubSubConn) {
-			exits := 0
-			for {
-				switch msg := pubsub.Receive().(type) {
-				case error:
-					fmt.Println(msg)
-					wg.Done()
-					return
-				case redis.Message:
-					if string(msg.Data) == "exit" {
-						// only first thread gets exits
-						if exits++; exits == p {
-							// close all pubsubs
-							for _, ps := range pubsubs {
-								ps.Close()
-							}
-							wg.Done()
-							return
-						}
-					}
-				}
-				func() {
-					mu.Lock()
-					defer mu.Unlock()
-					if total == 0 {
-						startTime = time.Now()
-					}
-					total++
-				}()
-			}
-		}(pubsub)
+	// start polling
+	subscribers := make([]*subscriber, len(pubsubs))
+	for i, pubsub := range pubsubs {
+		subscriber := &subscriber{}
+		subscribers[i] = subscriber
+		go subscriber.start(pubsub, done, read, &wg)
 	}
 	wg.Wait()
+
+	var startTime time.Time
+	total := 0
+	for i, subscriber := range subscribers {
+		if i == 0 {
+			startTime = subscriber.startTime
+		}
+		if subscriber.startTime.Before(startTime) {
+			startTime = subscriber.startTime
+		}
+		total += subscriber.total
+	}
+	return total, startTime
 }
