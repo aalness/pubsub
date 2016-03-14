@@ -16,21 +16,80 @@ import (
 
 var R = flag.Int("r", 0, "rate to produce messages (per second)")
 var N = flag.Int("n", 0, "number of topics")
-var P = flag.Int("p", 0, "number of publishers")
-var B = flag.Int("b", 0, "number of publishes to include in a batch")
-
-var total int
-var startTime time.Time
+var B = flag.Int("b", 1, "number of messages to include in a batch")
+var S = flag.Int("s", 0, "number of start messages to wait before publishing")
+var C = flag.Bool("c", false, "reset counter")
 
 var NUM_PUBLISHER_THREADS = 4
 var NUM_SUBSCRIBER_THREADS = 16
 
 func usage() {
 	fmt.Printf("Usage:\n\n")
-	fmt.Printf("  publish messages at rate R randomly across N different topics:\n")
-	fmt.Printf("    -r <R> -n <N> -b <batch size if any> publish\n\n")
-	fmt.Printf("  subscribe to N different topics and expect P publishers:\n")
-	fmt.Printf("    -n <N> -p <P> subscribe\n\n")
+	fmt.Printf("  after S start messages publish messages at rate R randomly across N topics for which it also subscribes:\n")
+	fmt.Printf("    -r <R> -n <N> -s <S> -b <batch size if any> publish\n\n")
+}
+
+const letterBytes = "abcdef0123456789"
+const (
+	letterIdxBits = 6                    // 6 bits to represent a letter index
+	letterIdxMask = 1<<letterIdxBits - 1 // All 1-bits, as many as letterIdxBits
+	letterIdxMax  = 63 / letterIdxBits   // # of letter indices fitting in 63 bits
+)
+
+func randHexString(n int) string {
+	b := make([]byte, n)
+	for i, cache, remain := n-1, rand.Int63(), letterIdxMax; i >= 0; {
+		if remain == 0 {
+			cache, remain = rand.Int63(), letterIdxMax
+		}
+		if idx := int(cache & letterIdxMask); idx < len(letterBytes) {
+			b[i] = letterBytes[idx]
+			i--
+		}
+		cache >>= letterIdxBits
+		remain--
+	}
+	return string(b)
+}
+
+// measure latencies of at least our own messages
+type latencyMeter struct {
+	sent map[string]time.Time
+	received map[string]time.Time
+	mu sync.Mutex
+}
+
+func (lm *latencyMeter) markSent(msg string) {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+	lm.sent[msg] = time.Now()
+}
+
+func (lm *latencyMeter) markReceived(msg string) {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+	if _, ok := lm.sent[msg]; ok {
+		lm.received[msg] = time.Now()
+	}
+}
+
+func (lm *latencyMeter) stats() (min, mean, max int64) {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+	for msg, received := range lm.received {
+		diff := received.Sub(lm.sent[msg])
+		if min == 0 || diff.Nanoseconds() < min {
+			min = diff.Nanoseconds()
+		}
+		if max == 0 || diff.Nanoseconds() > max {
+			max = diff.Nanoseconds()
+		}
+		mean += diff.Nanoseconds() / int64(time.Millisecond)
+	}
+	min /= int64(time.Millisecond)
+	max /= int64(time.Millisecond)
+	mean /= int64(len(lm.received))
+	return
 }
 
 func main() {
@@ -46,36 +105,53 @@ func main() {
 		return
 	}
 
+	rand.Seed(time.Now().UnixNano())
+	
 	switch flag.Arg(0) {
 	case "publish":
-		if *N == 0 || *R == 0 {
+		if *N == 0 || *R == 0 || *S == 0 {
 			usage()
 			return
 		}
 		c := make(chan os.Signal, 1)
+		ready := make(chan struct{}, 1)
 		done := make(chan struct{}, 1)
 		signal.Notify(c, os.Interrupt)
 		go func() {
 			<-c
 			close(done)
 		}()
-		publish(address, *R, *N, *B, done)
-	case "subscribe":
-		if *N == 0 || *P == 0 {
-			usage()
-			return
+		latencyMeter := &latencyMeter{
+			sent: make(map[string]time.Time),
+			received: make(map[string]time.Time),
 		}
-		subscribe(address, *N, *P)
+		var totalReceived, totalSent int
+		var startSubscribe, startPublish time.Time
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			totalSent, startPublish = publish(address, *S, *R, *N, *B, latencyMeter, ready, done)
+			wg.Done()
+		}()
+		go func() {
+			totalReceived, startSubscribe = subscribe(address, *N, *S, *C, latencyMeter, ready)
+			wg.Done()
+		}()
+		wg.Wait()
+		receiveRate := float64(totalReceived) / time.Now().Sub(startSubscribe).Seconds()
+		sendRate := float64(totalSent) / time.Now().Sub(startPublish).Seconds()
+		min, mean, max := latencyMeter.stats()
+		fmt.Printf("total msgs sent: %d, achieved rate: %.2f msgs/sec\n", totalSent, sendRate)
+		fmt.Printf("total msgs received: %d, achieved rate: %.2f msgs/sec\n", totalReceived, receiveRate)
+		fmt.Printf("latency: min %d ms, mean %d ms, max %d ms\n", min, mean, max)
 	default:
 		usage()
 		return
 	}
-	rate := float64(total) / time.Now().Sub(startTime).Seconds()
-	fmt.Printf("total msgs processed: %d, achieved rate: %.2f msgs/sec\n", total, rate)
 }
 
 // publish at a fixed rate with a single thread
-func publish(address string, r, n, b int, done chan struct{}) {
+func publish(address string, s, r, n, b int, lm *latencyMeter, ready, done chan struct{}) (total int, start time.Time) {
 	// create a connection per thread
 	conns := make([]redis.Conn, NUM_PUBLISHER_THREADS)
 	for i := 0; i < len(conns); i++ {
@@ -85,12 +161,50 @@ func publish(address string, r, n, b int, done chan struct{}) {
 		}
 		conns[i] = conn
 	}
+	
+	// wait for all of the expected subscribers to subscribe
+	conn, err := redis.Dial("tcp", address)
+	if err != nil {
+		panic(err)
+	}
+	conn2, err := redis.Dial("tcp", address)
+	if err != nil {
+		panic(err)
+	}
+	pubsub := &redis.PubSubConn{conn}
+	if err := pubsub.Subscribe("ready"); err != nil {
+		panic(err)
+	}
+	switch msg := pubsub.Receive().(type) {
+	case error:
+		panic(msg)
+	}
+	close(ready)
+	ready2 := false
+	for !ready2 {
+		switch msg := pubsub.Receive().(type) {
+		case error:
+			panic(msg)
+		case redis.Message:
+			num, err := conn2.Do("GET", "nsubscribers")
+			if err != nil {
+				panic(err)
+			}
+			numStr, _ := redis.String(num, err)
+			n, _ := strconv.Atoi(numStr)
+			if n == s {
+				pubsub.Close()
+				conn2.Close()
+				ready2 = true
+			}
+		}
+	}
 
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	wg.Add(len(conns))
 
-	startTime = time.Now()
+	start = time.Now()
 	for _, c := range conns {
 		go func(conn redis.Conn) {
 			count := 0
@@ -99,7 +213,9 @@ func publish(address string, r, n, b int, done chan struct{}) {
 				r := limiter.ReserveN(time.Now(), 1)
 				if r.OK() {
 					topic := strconv.Itoa(rand.Intn(n))
-					if err := conn.Send("PUBLISH", topic, "update"); err != nil {
+					msg := randHexString(64)
+					lm.markSent(msg)
+					if err := conn.Send("PUBLISH", topic, msg); err != nil {
 						panic(err)
 					}
 					count++
@@ -142,10 +258,12 @@ func publish(address string, r, n, b int, done chan struct{}) {
 	if _, err := conns[0].Do("PUBLISH", "0", "exit"); err != nil {
 		panic(err)
 	}
+
+	return
 }
 
 // subscribe NUM_SUBSCRIBER_THREADS threads
-func subscribe(address string, n, p int) {
+func subscribe(address string, n, p int, reset bool, lm *latencyMeter, ready chan struct{}) (total int, start time.Time) {
 	// create a connection per thread
 	pubsubs := make([]*redis.PubSubConn, NUM_SUBSCRIBER_THREADS)
 	for i := 0; i < len(pubsubs); i++ {
@@ -169,6 +287,26 @@ func subscribe(address string, n, p int) {
 	}
 	fmt.Printf("subscribed to %d topics\n", n)
 
+	<-ready
+	
+	// tell the publishers we're ready
+	conn, err := redis.Dial("tcp", address)
+	if err != nil {
+		panic(err)
+	}
+	if reset {
+		if _, err := conn.Do("SET", "nsubscribers", 0); err != nil {
+			panic(err)
+		}
+	}
+	if _, err := conn.Do("INCR", "nsubscribers"); err != nil {
+		panic(err)
+	}
+	if _, err := conn.Do("PUBLISH", "ready", "ready"); err != nil {
+		panic(err)
+	}
+	conn.Close()
+	
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	wg.Add(len(pubsubs))
@@ -184,7 +322,8 @@ func subscribe(address string, n, p int) {
 					wg.Done()
 					return
 				case redis.Message:
-					if string(msg.Data) == "exit" {
+					m := string(msg.Data)
+					if m == "exit" {
 						// only first thread gets exits
 						if exits++; exits == p {
 							// close all pubsubs
@@ -194,13 +333,15 @@ func subscribe(address string, n, p int) {
 							wg.Done()
 							return
 						}
+					} else {
+						lm.markReceived(m)
 					}
 				}
 				func() {
 					mu.Lock()
 					defer mu.Unlock()
 					if total == 0 {
-						startTime = time.Now()
+						start = time.Now()
 					}
 					total++
 				}()
@@ -208,4 +349,5 @@ func subscribe(address string, n, p int) {
 		}(pubsub)
 	}
 	wg.Wait()
+	return
 }
